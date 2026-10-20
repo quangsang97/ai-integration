@@ -1,0 +1,34 @@
+name: OptiBot daily scrape + upload delta
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # every day 02:00 UTC
+  workflow_dispatch: {} # lets you press "Run workflow" manually
+
+jobs:
+  scrape-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t optibot .
+
+      - name: Run job (re-scrape, detect delta, upload only changes)
+        run: |
+          mkdir -p out
+          docker run --rm \
+            -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+            -v "$PWD/out:/app/out" \
+            optibot | tee out/job.log
+
+      - name: Keep last-run artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-run
+          path: |
+            out/last_run.json
+            out/job.log
+          retention-days: 30
