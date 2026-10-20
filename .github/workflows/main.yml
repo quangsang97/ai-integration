@@ -16,10 +16,12 @@ jobs:
         run: docker build -t optibot .
 
       - name: Run job (re-scrape, detect delta, upload only changes)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p out
           docker run --rm \
-            -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+            -e GEMINI_API_KEY \
             -v "$PWD/out:/app/out" \
             optibot | tee out/job.log
 
