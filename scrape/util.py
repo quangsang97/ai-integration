@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,11 @@ class Converter(MarkdownConverter):
         code: str = el.get_text()
         return f"\n\n```\n{code.strip(chr(10))}\n```\n\n"
 
+def content_hash(md: str) -> str:
+    return hashlib.sha256(md.encode("utf-8")).hexdigest()[:12]
+
+def make_display_name(url: str, art_id: int, h: str) -> str:
+    return f"{url} [id={art_id} h={h}]"
 
 def get_article_slug(article: Article | dict[str, Any]) -> str:
     # html_url looks like .../articles/48626115821459-How-to-Use-the-YouTube-Dashboard-App

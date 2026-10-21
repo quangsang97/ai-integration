@@ -12,7 +12,6 @@ Env: GEMINI_API_KEY (required), STORE_DISPLAY_NAME, ARTICLE_LIMIT (0 = all),
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -28,7 +27,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 if TYPE_CHECKING:
     from google import genai
 
-from scrape import fetch_articles, get_article_slug, to_markdown
+from scrape import fetch_articles, get_article_slug, to_markdown, make_display_name, content_hash
 
 STORE_DISPLAY_NAME: str = os.getenv("STORE_DISPLAY_NAME", "optisigns-support")
 ARTICLE_LIMIT: int = int(os.getenv("ARTICLE_LIMIT", "30"))
@@ -80,14 +79,6 @@ class RunSummary(TypedDict):
 
 
 # ---------- pure logic (unit-testable) ----------
-def content_hash(md: str) -> str:
-    return hashlib.sha256(md.encode("utf-8")).hexdigest()[:12]
-
-
-def make_display_name(url: str, art_id: int, h: str) -> str:
-    return f"{url} [id={art_id} h={h}]"
-
-
 def parse_display_name(name: str | None) -> tuple[int, str] | None:
     m = TAG_RE.search(name or "")
     return (int(m.group(1)), m.group(2)) if m else None
@@ -163,7 +154,7 @@ def upload_one(
                 time.sleep(3)
                 op = client.operations.get(op)
             return True
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("upload %s failed (try %d/%d): %s", path.name, attempt, retries, e)
             time.sleep(2 * attempt)
     return False
@@ -244,7 +235,6 @@ def run(client: genai.Client | None = None) -> RunSummary:
     (OUT_DIR / "last_run.json").write_text(json.dumps(summary, indent=2))
     log.info("SUMMARY %s", json.dumps(summary))
     return summary
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

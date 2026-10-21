@@ -10,6 +10,8 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from scrape import content_hash, make_display_name
+
 ARTICLES_DIR: Path = Path("articles")
 STORE_FILE: Path = Path(".store_name")
 MODEL: str = "gemini-3.8-flash"
@@ -52,12 +54,15 @@ def upload(cli: genai.Client | None = None) -> None:
     est_chunks: int = 0
     for f in files:
         text: str = f.read_text(encoding="utf-8")
+        m = re.search(r"(\d+)\.md$", f.name)
+        id_file = m.group(1) if m else None
+        h = content_hash(text)
         # display_name shows up as the citation title -> use the article URL
         op = c.file_search_stores.upload_to_file_search_store(
             file=str(f),
             file_search_store_name=store.name,
             config={
-                "display_name": source_url(text, f.name),
+                "display_name": make_display_name(source_url(text, f.name), id_file, h),
                 "mime_type": "text/markdown",
                 "chunking_config": {
                     "white_space_config": {
@@ -71,7 +76,7 @@ def upload(cli: genai.Client | None = None) -> None:
         # rough estimate: ~4 chars/token (the API doesn't report chunk counts)
         est_chunks += max(1, math.ceil(len(text) / 4 / (MAX_TOKENS_PER_CHUNK - MAX_OVERLAP_TOKENS)))
 
-    for name, op in ops:                  # wait for indexing to finish
+    for name, op in ops: # wait for indexing to finish
         while not op.done:
             time.sleep(3)
             op = c.operations.get(op)
@@ -103,8 +108,6 @@ def ask(question: str, cli: genai.Client | None = None) -> None:
     print("\nSources retrieved:")
     for u in urls[:3]:
         print("Article URL:", u)
-
- 
  
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "upload":
