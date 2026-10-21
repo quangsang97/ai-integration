@@ -10,6 +10,8 @@ so the job is stateless and works on any ephemeral container (cron job).
 Env: GEMINI_API_KEY (required), STORE_DISPLAY_NAME, ARTICLE_LIMIT (0 = all),
      UPLOAD_WORKERS, OUT_DIR, DELETE_REMOVED (1/0)
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -21,18 +23,60 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypedDict
+
+if TYPE_CHECKING:
+    from google import genai
 
 from scrape import fetch_articles, get_article_slug, to_markdown
 
-STORE_DISPLAY_NAME = os.getenv("STORE_DISPLAY_NAME", "optisigns-support")
-ARTICLE_LIMIT = int(os.getenv("ARTICLE_LIMIT", "30"))
-WORKERS = int(os.getenv("UPLOAD_WORKERS", "2"))
-OUT_DIR = Path(os.getenv("OUT_DIR", "out"))
-DELETE_REMOVED = os.getenv("DELETE_REMOVED", "1") == "1"
-MAX_TOKENS_PER_CHUNK, MAX_OVERLAP_TOKENS = 400, 40
+STORE_DISPLAY_NAME: str = os.getenv("STORE_DISPLAY_NAME", "optisigns-support")
+ARTICLE_LIMIT: int = int(os.getenv("ARTICLE_LIMIT", "30"))
+WORKERS: int = int(os.getenv("UPLOAD_WORKERS", "2"))
+OUT_DIR: Path = Path(os.getenv("OUT_DIR", "out"))
+DELETE_REMOVED: bool = os.getenv("DELETE_REMOVED", "1") == "1"
+MAX_TOKENS_PER_CHUNK: int = 400
+MAX_OVERLAP_TOKENS: int = 40
 
-TAG_RE = re.compile(r"\[id=(\d+) h=([0-9a-f]{12})\]\s*$")
-log = logging.getLogger("optibot")
+TAG_RE: re.Pattern[str] = re.compile(r"\[id=(\d+) h=([0-9a-f]{12})\]\s*$")
+log: logging.Logger = logging.getLogger("optibot")
+
+
+# ---------- Type Definitions ----------
+ArticleId = int
+ContentHash = str
+DocumentName = str
+ExistingDoc = tuple[ContentHash, DocumentName]
+
+
+class Article(TypedDict, total=False):
+    id: int
+    title: str
+    html_url: str
+    updated_at: str
+    body: str | None
+    draft: bool
+
+
+class DeltaPlan(TypedDict):
+    added: list[ArticleId]
+    updated: list[ArticleId]
+    skipped: list[ArticleId]
+    removed: list[ArticleId]
+    stale_docs: list[DocumentName]
+
+
+class RunSummary(TypedDict):
+    run_at: str
+    store: str
+    scraped: int
+    added: int
+    updated: int
+    skipped: int
+    removed: int
+    failed: int
+    files_uploaded: int
+    chunks_embedded_estimate: int
 
 
 # ---------- pure logic (unit-testable) ----------
@@ -44,17 +88,20 @@ def make_display_name(url: str, art_id: int, h: str) -> str:
     return f"{url} [id={art_id} h={h}]"
 
 
-def parse_display_name(name: str):
+def parse_display_name(name: str | None) -> tuple[int, str] | None:
     m = TAG_RE.search(name or "")
     return (int(m.group(1)), m.group(2)) if m else None
 
 
-def plan_delta(current: dict, existing: dict):
+def plan_delta(
+    current: dict[ArticleId, ContentHash],
+    existing: dict[ArticleId, list[ExistingDoc]],
+) -> DeltaPlan:
     """current:  {article_id: hash}
     existing: {article_id: [(hash, doc_name), ...]}   (what is in the store)
     -> dict of lists: added, updated, skipped, removed (ids) and
        stale_docs (doc names to delete: old versions / duplicates / removed)."""
-    out = {"added": [], "updated": [], "skipped": [], "removed": [], "stale_docs": []}
+    out: DeltaPlan = {"added": [], "updated": [], "skipped": [], "removed": [], "stale_docs": []}
     for aid, h in current.items():
         docs = existing.get(aid, [])
         same = [d for d in docs if d[0] == h]
@@ -74,7 +121,7 @@ def plan_delta(current: dict, existing: dict):
 
 
 # ---------- Gemini helpers ----------
-def get_or_create_store(client):
+def get_or_create_store(client: genai.Client) -> str:
     for s in client.file_search_stores.list():
         if s.display_name == STORE_DISPLAY_NAME:
             return s.name
@@ -83,8 +130,8 @@ def get_or_create_store(client):
     return s.name
 
 
-def list_existing(client, store):
-    existing = {}
+def list_existing(client: genai.Client, store: str) -> dict[ArticleId, list[ExistingDoc]]:
+    existing: dict[ArticleId, list[ExistingDoc]] = {}
     for d in client.file_search_stores.documents.list(parent=store):
         parsed = parse_display_name(d.display_name)
         if parsed:
@@ -92,7 +139,13 @@ def list_existing(client, store):
     return existing
 
 
-def upload_one(client, store, path: Path, disp: str, retries=3):
+def upload_one(
+    client: genai.Client,
+    store: str,
+    path: Path,
+    disp: str,
+    retries: int = 3,
+) -> bool:
     for attempt in range(1, retries + 1):
         try:
             op = client.file_search_stores.upload_to_file_search_store(
@@ -116,16 +169,17 @@ def upload_one(client, store, path: Path, disp: str, retries=3):
     return False
 
 
-def run(client=None):
+def run(client: genai.Client | None = None) -> RunSummary:
     from google import genai
     from google.genai import types
     client = client or genai.Client(http_options=types.HttpOptions(timeout=120_000))
 
     OUT_DIR.mkdir(exist_ok=True)
-    articles = fetch_articles(ARTICLE_LIMIT)
-    id_to_file = {a["id"]: f"{get_article_slug(a)}.md" for a in articles}
+    articles: list[Article] = fetch_articles(ARTICLE_LIMIT)
+    id_to_file: dict[int, str] = {a["id"]: f"{get_article_slug(a)}.md" for a in articles}
 
-    docs, current = {}, {}
+    docs: dict[int, tuple[Path, str, int]] = {}
+    current: dict[int, str] = {}
     for a in articles:
         body = to_markdown(a["body"] or "", id_to_file)
         md = (f"---\ntitle: \"{a['title'].replace(chr(34), chr(39))}\"\n"
@@ -140,22 +194,24 @@ def run(client=None):
     store = get_or_create_store(client)
     existing = list_existing(client, store)
     plan = plan_delta(current, existing)
-    to_upload = plan["added"] + plan["updated"]
+    to_upload: list[int] = plan["added"] + plan["updated"]
     log.info("scraped=%d  added=%d updated=%d skipped=%d removed=%d",
              len(articles), len(plan["added"]), len(plan["updated"]),
              len(plan["skipped"]), len(plan["removed"]))
 
     # 1) upload new versions first (so a failure never leaves an article missing)
-    failed = []
+    failed: list[int] = []
     with ThreadPoolExecutor(WORKERS) as ex:
-        results = list(ex.map(lambda i: (i, upload_one(client, store, docs[i][0], docs[i][1])),
-                              to_upload))
-    ok = {i for i, good in results if good}
+        results: list[tuple[int, bool]] = list(
+            ex.map(lambda i: (i, upload_one(client, store, docs[i][0], docs[i][1])),
+                   to_upload)
+        )
+    ok: set[int] = {i for i, good in results if good}
     failed = [i for i, good in results if not good]
 
     # 2) delete stale docs, but only for articles whose new upload succeeded
     #    (+ duplicates of skipped articles, + removed articles if enabled)
-    delete = set()
+    delete: set[str] = set()
     for aid in plan["updated"]:
         if aid in ok:
             delete |= {d[1] for d in existing[aid]}
@@ -171,9 +227,9 @@ def run(client=None):
         except Exception as e:  # noqa: BLE001
             log.warning("delete %s failed: %s", name, e)
 
-    est_chunks = sum(max(1, math.ceil(docs[i][2] / 4 / (MAX_TOKENS_PER_CHUNK - MAX_OVERLAP_TOKENS)))
-                     for i in ok)
-    summary = {
+    est_chunks: int = sum(max(1, math.ceil(docs[i][2] / 4 / (MAX_TOKENS_PER_CHUNK - MAX_OVERLAP_TOKENS)))
+                         for i in ok)
+    summary: RunSummary = {
         "run_at": datetime.now(timezone.utc).isoformat(),
         "store": store,
         "scraped": len(articles),
